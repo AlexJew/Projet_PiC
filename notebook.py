@@ -44,41 +44,11 @@ def library_and_config():
 
     @dataclass(frozen=True)
     class PVConfig:
-        """PV system parameters.
-
-        Attributes
-        ----------
-        reference_panels : int
-            Number of panels in the measurement dataset (dimensionless)
-        panel_power : float
-            Rated power per panel [W]
-        panel_surface : float
-            Surface area per panel [m²]
-        inverter_efficiency : float
-            DC to AC conversion efficiency (dimensionless, range [0, 1])
-        """
         reference_panels: int = 21
         panel_power: float = 340.0  # W
-        panel_surface: float = 2.0  # m²
-        inverter_efficiency: float = 1.0  # dimensionless
 
     @dataclass(frozen=True)
     class BatteryConfig:
-        """Battery system parameters.
-
-        Attributes
-        ----------
-        c_rate : float
-            Battery capacity rating [h]
-        efficiency : float
-            Round-trip efficiency (dimensionless, range [0, 1])
-        initial_soc : float
-            Initial state of charge (dimensionless, range [0, 1])
-        min_soc : float
-            Minimum state of charge (dimensionless, range [0, 1])
-        max_soc : float
-            Maximum state of charge (dimensionless, range [0, 1])
-        """
         efficiency: float = 0.95  # dimensionless
         initial_soc: float = 0.5  # dimensionless
         min_soc: float = 0.1  # dimensionless
@@ -86,65 +56,20 @@ def library_and_config():
 
     @dataclass(frozen=True)
     class AnalysisConfig:
-        """Analysis range parameters.
-
-        Attributes
-        ----------
-        pv_range : np.ndarray
-            Range of PV panel counts to analyze (dimensionless)
-        battery_power_range : np.ndarray
-            Range of battery power ratings to analyze [W]
-        """
         pv_range: np.ndarray = field(default_factory=lambda: np.arange(1, 51, 1))  # dimensionless
-        battery_power_range: np.ndarray = field(default_factory=lambda: np.arange(1000, 50001, 1000))  # W
+        battery_power_range: np.ndarray = field(default_factory=lambda: np.arange(1000, 100001, 1000))  # W
 
     @dataclass(frozen=True)
     class OptimizationConfig:
-        """Optimization parameters.
-
-        Attributes
-        ----------
-        default_weight : float
-            Default weight for self-consumption in composite criterion
-            (dimensionless, range [0, 1])
-        """
-        default_weight: float = 0.6  # dimensionless
+        default_weight: float = 0.5  # dimensionless
 
     @dataclass(frozen=True)
     class PathsConfig:
-        """Directory paths.
-
-        Attributes
-        ----------
-        data_dir : Path
-            Input data directory path
-        output_dir : Path
-            Output results directory path
-        """
         data_dir: Path = Path("data")
         output_dir: Path = Path("output")
 
     @dataclass(frozen=True)
     class PlotConfig:
-        """Plotting style parameters.
-
-        Attributes
-        ----------
-        line_width : float
-            Line width for plots [pt]
-        font_size : int
-            Font size for labels [pt]
-        summer_color : tuple[float, float, float]
-            RGB color for summer data (dimensionless, range [0, 1])
-        winter_color : tuple[float, float, float]
-            RGB color for winter data (dimensionless, range [0, 1])
-        time_unit_divisor : int
-            Divisor to convert minute indices to display units (60 for hours)
-        time_axis_title : str
-            Label for time axis
-        time_tick_interval : int
-            Interval between time axis ticks in display units (e.g., 12 for every 12 hours)
-        """
         line_width: float = 1.5  # pt
         font_size: int = 11  # pt
         summer_color: tuple[float, float, float] = (1.0, 0.0, 0.0)  # dimensionless (red)
@@ -162,7 +87,17 @@ def library_and_config():
     optimization_config = OptimizationConfig()
     paths_config = PathsConfig()
     plot_config = PlotConfig()
-    return PlotConfig, alt, np, paths_config, pd, plot_config, pv_config
+    return (
+        PlotConfig,
+        alt,
+        battery_config,
+        np,
+        paths_config,
+        pd,
+        plot_config,
+        plt,
+        pv_config,
+    )
 
 
 @app.cell(hide_code=True)
@@ -370,7 +305,6 @@ def _(
         production_ete_reference = solaire_ete[solar_ete_numeric_cols[0]].values
     else:
         production_ete_reference = solaire_ete.iloc[:, 0].values
-
     if len(solar_hiver_numeric_cols) > 0:
         production_hiver_reference = solaire_hiver[solar_hiver_numeric_cols[0]].values
     else:
@@ -438,7 +372,7 @@ def _(
 
     # Display statistics and chart together
     mo.vstack([stats_display_prod, chart_prod])
-    return
+    return (production_ete_reference,)
 
 
 @app.cell(hide_code=True)
@@ -966,6 +900,204 @@ def _(mo):
 
     La première partie se focalise sur l'identification de la plage de dimensionnement pour le système PV et le système de batterie sur la période estivale.
     """)
+    return
+
+
+@app.cell
+def _(charge, np, solaire_ete):
+    # Extract summer consumption
+    _consumption_ete = charge['Été'].values
+
+    # Extract summer production data
+    _solar_ete_cols = solaire_ete.select_dtypes(include=['float64', 'int64']).columns
+    if len(_solar_ete_cols) > 0:
+        _production_ete_reference = solaire_ete[_solar_ete_cols[0]].values
+    else:
+        _production_ete_reference = solaire_ete.iloc[:, 0].values
+
+    # Ensure matching lengths
+    _min_length = min(len(_consumption_ete), len(_production_ete_reference))
+    _consumption_ete = _consumption_ete[:_min_length]
+    _production_ete_reference = _production_ete_reference[:_min_length]
+
+    # Ensure matching lengths
+    _min_length = min(len(_consumption_ete), len(_production_ete_reference))
+    _consumption_ete = _consumption_ete[:_min_length]
+    _production_ete_reference = _production_ete_reference[:_min_length]
+
+    # Define ranges
+    _pv_range = range(1, 51)
+    _battery_range = np.arange(0, 105, 5)  * 1000 # 0 to 100 kWh, 5 kWh steps
+    return
+
+
+@app.cell
+def _(battery_config, mo, np, pd, production_ete, pv_config):
+    # Ensure matching lengths
+    _min_length = min(len(_consumption_ete), len(_production_ete_reference))
+    _consumption_ete = _consumption_ete[:_min_length]
+    _production_ete_reference = _production_ete_reference[:_min_length]
+
+    # Define ranges
+    _pv_range = range(1, 51)
+    _battery_range = np.arange(0, 105, 5)  * 1000 # 0 to 100 kWh, 5 kWh steps
+
+    # Initialize storage for results
+    _results_data = {
+        'pv_panels': [],
+        'battery_capacity_kwh': [],
+        'autoconso' : [],
+        'autoprod' : [],
+        'composite': []
+    }
+
+    # Battery parameters
+    _battery_efficiency = battery_config.efficiency
+    _initial_soc = battery_config.initial_soc
+    _min_soc = battery_config.min_soc
+    _max_soc = battery_config.max_soc
+
+    # Loop through all combinations
+    for _n_panels in _pv_range:
+        # Scale production for this panel count
+        _scaling_factor = _n_panels / pv_config.reference_panels
+        _production_scaled = production_ete * _scaling_factor
+
+        for _battery_capacity in _battery_range:
+            # Skip if battery capacity is 0 - no battery simulation needed
+            if _battery_capacity == 0:
+                # Calculate without battery
+                _locally_consumed = np.minimum(_production_scaled, _consumption_ete)
+                _total_consumption = np.sum(_consumption_ete)
+                _total_production = np.sum(_production_scaled)
+                _total_locally_consumed = np.sum(_locally_consumed)
+
+                _autoconso = (_total_locally_consumed / _total_consumption) * 100
+                _autoprod = (_total_locally_consumed / _total_production) * 100 if _total_production > 0 else 0.0
+                _composite = 0.5 * _autoconso + 0.5 * _autoprod
+
+                _results_data['pv_panels'].append(_n_panels)
+                _results_data['battery_capacity_kwh'].append(_battery_capacity)
+                _results_data['autoconso'].append(_autoconso)
+                _results_data['autoprod'].append(_autoprod)
+                _results_data['composite'].append(_composite)
+                continue
+
+            # Battery simulation
+            _current_soe = _initial_soc * _battery_capacity
+            _battery_min_capacity = _min_soc * _battery_capacity
+            _battery_max_capacity = _max_soc * _battery_capacity
+
+            _energy_from_grid = 0.0
+            _excess_sold = 0.0
+
+            # Timestep simulation
+            for _i in range(len(_consumption_ete)):
+                _net_power = _production_scaled[_i] - _consumption_ete[_i]
+
+                if _net_power > 0:
+                    # Excess production
+                    _charge_to_add = min(_net_power, _battery_max_capacity - _current_soe)
+                    _current_soe += _charge_to_add * _battery_efficiency
+                    _excess_sold += _net_power - _charge_to_add
+                else:
+                    # Deficit
+                    _energy_needed = abs(_net_power)
+                    _discharge = min(_energy_needed / _battery_efficiency, _current_soe - _battery_min_capacity)
+                    _current_soe -= _discharge
+                    _energy_from_grid += _energy_needed - _discharge * _battery_efficiency
+
+            # Correct for SOE difference
+            _final_soe_diff = _current_soe - _initial_soc * _battery_capacity
+
+            # Calculate metrics
+            _total_consumption = np.sum(_consumption_ete)
+            _total_production = np.sum(_production_scaled)
+
+            _autoconso = ((_total_consumption - _energy_from_grid) / _total_consumption) * 100
+
+            if _final_soe_diff > 0:
+                # Battery gained energy - subtract from autoproduction
+                _autoprod = ((_total_production - _excess_sold - _final_soe_diff) / _total_production) * 100
+            else:
+                # Battery lost energy - already accounted in autoconsumption
+                _autoprod = ((_total_production - _excess_sold) / _total_production) * 100
+
+            _composite = 0.5 * _autoconso + 0.5 * _autoprod
+
+            _results_data['pv_panels'].append(_n_panels)
+            _results_data['battery_capacity_kwh'].append(_battery_capacity)
+            _results_data['autoconso'].append(_autoconso)
+            _results_data['autoprod'].append(_autoprod)
+            _results_data['composite'].append(_composite)
+
+    # Create DataFrame
+    results_3d_df = pd.DataFrame(_results_data)
+    mo.ui.table(_results_data)
+    return (results_3d_df,)
+
+
+@app.cell
+def _(production_ete_reference):
+    production_ete_reference
+    return
+
+
+@app.cell
+def _(results_3d_df):
+    results_3d_df
+    return
+
+
+@app.cell
+def _(mo, np, plot_config, plt, results_3d_df):
+    from mpl_toolkits.mplot3d import Axes3D
+
+    # Prepare data for 3D plot
+    _pv_range = results_3d_df['pv_panels'].unique()
+    _battery_range = results_3d_df['battery_capacity_kwh'].unique()
+    _X, _Y = np.meshgrid(_pv_range, _battery_range)
+    _Z = results_3d_df['composite'].values.reshape(len(_battery_range), len(_pv_range))
+
+    # Create 3D figure
+    _fig = plt.figure(figsize=(12, 8))
+    _ax = _fig.add_subplot(111, projection='3d')
+
+    # Plot surface
+    _surf = _ax.plot_surface(_X, _Y, _Z, cmap='viridis', edgecolor='none', alpha=0.9)
+
+    # Add labels and title
+    _ax.set_xlabel('Nombre de panneaux PV', fontsize=plot_config.font_size)
+    _ax.set_ylabel('Capacité batterie (kWh)', fontsize=plot_config.font_size)
+    _ax.set_zlabel('Critère composite (%)', fontsize=plot_config.font_size)
+    _ax.set_title('Critère composite - Système PV + Batterie (Été)', fontsize=plot_config.font_size + 2)
+
+    # Add colorbar
+    _fig.colorbar(_surf, ax=_ax, shrink=0.5, aspect=5, label='Critère composite (%)')
+
+    # Adjust viewing angle
+    _ax.view_init(elev=25, azim=45)
+
+    plt.tight_layout()
+
+    # Find and mark maximum
+    _max_idx = results_3d_df['composite'].idxmax()
+    _max_pv = results_3d_df.loc[_max_idx, 'pv_panels']
+    _max_battery = results_3d_df.loc[_max_idx, 'battery_capacity_kwh']
+    _max_composite = results_3d_df.loc[_max_idx, 'composite']
+
+    # Display statistics
+    mo.md(f"""
+    **Optimum global:**
+    - Panneaux PV: {int(_max_pv)}
+    - Capacité batterie: {_max_battery:.0f} kWh
+    - Critère composite: {_max_composite:.2f}%
+    """)
+    return
+
+
+@app.cell
+def _():
     return
 
 
