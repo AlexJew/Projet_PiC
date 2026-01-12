@@ -372,7 +372,7 @@ def _(
 
     # Display statistics and chart together
     mo.vstack([stats_display_prod, chart_prod])
-    return (production_ete_reference,)
+    return
 
 
 @app.cell(hide_code=True)
@@ -904,7 +904,15 @@ def _(mo):
 
 
 @app.cell
-def _(charge, np, solaire_ete):
+def compute_battery_behavior(
+    battery_config,
+    charge,
+    mo,
+    np,
+    pd,
+    pv_config,
+    solaire_ete,
+):
     # Extract summer consumption
     _consumption_ete = charge['Été'].values
 
@@ -928,24 +936,11 @@ def _(charge, np, solaire_ete):
     # Define ranges
     _pv_range = range(1, 51)
     _battery_range = np.arange(0, 105, 5)  * 1000 # 0 to 100 kWh, 5 kWh steps
-    return
-
-
-@app.cell
-def _(battery_config, mo, np, pd, production_ete, pv_config):
-    # Ensure matching lengths
-    _min_length = min(len(_consumption_ete), len(_production_ete_reference))
-    _consumption_ete = _consumption_ete[:_min_length]
-    _production_ete_reference = _production_ete_reference[:_min_length]
-
-    # Define ranges
-    _pv_range = range(1, 51)
-    _battery_range = np.arange(0, 105, 5)  * 1000 # 0 to 100 kWh, 5 kWh steps
 
     # Initialize storage for results
     _results_data = {
         'pv_panels': [],
-        'battery_capacity_kwh': [],
+        'battery_capacity_wh': [],
         'autoconso' : [],
         'autoprod' : [],
         'composite': []
@@ -961,7 +956,7 @@ def _(battery_config, mo, np, pd, production_ete, pv_config):
     for _n_panels in _pv_range:
         # Scale production for this panel count
         _scaling_factor = _n_panels / pv_config.reference_panels
-        _production_scaled = production_ete * _scaling_factor
+        _production_scaled = _production_ete_reference * _scaling_factor
 
         for _battery_capacity in _battery_range:
             # Skip if battery capacity is 0 - no battery simulation needed
@@ -977,14 +972,15 @@ def _(battery_config, mo, np, pd, production_ete, pv_config):
                 _composite = 0.5 * _autoconso + 0.5 * _autoprod
 
                 _results_data['pv_panels'].append(_n_panels)
-                _results_data['battery_capacity_kwh'].append(_battery_capacity)
+                _results_data['battery_capacity_wh'].append(_battery_capacity)
                 _results_data['autoconso'].append(_autoconso)
                 _results_data['autoprod'].append(_autoprod)
                 _results_data['composite'].append(_composite)
                 continue
 
             # Battery simulation
-            _current_soe = _initial_soc * _battery_capacity
+            _initial_soe = _initial_soc * _battery_capacity
+            _current_soe = _initial_soe
             _battery_min_capacity = _min_soc * _battery_capacity
             _battery_max_capacity = _max_soc * _battery_capacity
 
@@ -1008,7 +1004,7 @@ def _(battery_config, mo, np, pd, production_ete, pv_config):
                     _energy_from_grid += _energy_needed - _discharge * _battery_efficiency
 
             # Correct for SOE difference
-            _final_soe_diff = _current_soe - _initial_soc * _battery_capacity
+            _final_soe_diff = _current_soe - _initial_soe
 
             # Calculate metrics
             _total_consumption = np.sum(_consumption_ete)
@@ -1026,7 +1022,7 @@ def _(battery_config, mo, np, pd, production_ete, pv_config):
             _composite = 0.5 * _autoconso + 0.5 * _autoprod
 
             _results_data['pv_panels'].append(_n_panels)
-            _results_data['battery_capacity_kwh'].append(_battery_capacity)
+            _results_data['battery_capacity_wh'].append(_battery_capacity)
             _results_data['autoconso'].append(_autoconso)
             _results_data['autoprod'].append(_autoprod)
             _results_data['composite'].append(_composite)
@@ -1038,14 +1034,145 @@ def _(battery_config, mo, np, pd, production_ete, pv_config):
 
 
 @app.cell
-def _(production_ete_reference):
-    production_ete_reference
+def _(results_3d_df):
+    results_3d_df
     return
 
 
-@app.cell
-def _(results_3d_df):
-    results_3d_df
+@app.cell(hide_code=True)
+def _(mo):
+    mo.md(r"""
+    ### Analyse temporelle du comportement batterie
+
+    Visualisation de l'état d'énergie (SOE), de la production PV et de la consommation
+    pour une configuration fixe (14 panneaux, capacité batterie configurable).
+    """)
+    return
+
+
+@app.cell(hide_code=True)
+def simulate_timestep_analysis(battery_config, charge, mo, np, pd, pv_config, solaire_ete):
+    # PARAMÈTRES CONFIGURABLES
+    _n_panels = 14  # Fixe à 14 panneaux
+    _battery_capacity_wh = 50000  # 50 kWh par défaut
+
+    # Extract summer consumption
+    _consumption_ete = charge['Été'].values
+
+    # Extract summer production data
+    _solar_ete_cols = solaire_ete.select_dtypes(include=['float64', 'int64']).columns
+    if len(_solar_ete_cols) > 0:
+        _production_ete_reference = solaire_ete[_solar_ete_cols[0]].values
+    else:
+        _production_ete_reference = solaire_ete.iloc[:, 0].values
+
+    # Ensure matching lengths
+    _min_length = min(len(_consumption_ete), len(_production_ete_reference))
+    _consumption_ete = _consumption_ete[:_min_length]
+    _production_ete_reference = _production_ete_reference[:_min_length]
+
+    # Scale production for 14 panels
+    _scaling_factor = _n_panels / pv_config.reference_panels
+    _production_scaled = _production_ete_reference * _scaling_factor
+
+    # Battery simulation parameters
+    _battery_efficiency = battery_config.efficiency
+    _initial_soc = battery_config.initial_soc
+    _min_soc = battery_config.min_soc
+    _max_soc = battery_config.max_soc
+
+    _initial_soe = _initial_soc * _battery_capacity_wh
+    _current_soe = _initial_soe
+    _battery_min_capacity = _min_soc * _battery_capacity_wh
+    _battery_max_capacity = _max_soc * _battery_capacity_wh
+
+    # Initialize timestep data storage
+    _timestep_data = {
+        'timestep': [],
+        'current_soe_wh': [],
+        'consumption_w': [],
+        'production_w': [],
+        'battery_power_w': [],  # Positive = charging, negative = discharging
+        'grid_power_w': []  # Positive = importing, negative = exporting
+    }
+
+    # Timestep simulation
+    for _i in range(len(_consumption_ete)):
+        _net_power = _production_scaled[_i] - _consumption_ete[_i]
+
+        if _net_power > 0:
+            # Excess production
+            _charge_to_add = min(_net_power, _battery_max_capacity - _current_soe)
+            _current_soe += _charge_to_add * _battery_efficiency
+            _battery_power = _charge_to_add  # Charging
+            _grid_power = _net_power - _charge_to_add  # Excess to grid
+        else:
+            # Deficit
+            _energy_needed = abs(_net_power)
+            _discharge = min(_energy_needed / _battery_efficiency, _current_soe - _battery_min_capacity)
+            _current_soe -= _discharge
+            _battery_power = -_discharge * _battery_efficiency  # Discharging
+            _grid_power = -(_energy_needed - _discharge * _battery_efficiency)  # From grid
+
+        # Store timestep data
+        _timestep_data['timestep'].append(_i)
+        _timestep_data['current_soe_wh'].append(_current_soe)
+        _timestep_data['consumption_w'].append(_consumption_ete[_i])
+        _timestep_data['production_w'].append(_production_scaled[_i])
+        _timestep_data['battery_power_w'].append(_battery_power)
+        _timestep_data['grid_power_w'].append(_grid_power)
+
+    timestep_df = pd.DataFrame(_timestep_data)
+
+    return _battery_capacity_wh, _n_panels, timestep_df
+
+
+@app.cell(hide_code=True)
+def plot_timestep_analysis(_battery_capacity_wh, _n_panels, mo, np, plot_config, plt, timestep_df):
+    # Prepare data (convert minutes to hours)
+    _time_hours = timestep_df['timestep'].values / 60
+
+    # Create figure with subplots
+    _fig, _axes = plt.subplots(3, 1, figsize=(14, 10), sharex=True)
+
+    # Plot 1: Production and Consumption
+    _axes[0].plot(_time_hours, timestep_df['production_w'].values / 1000,
+                  label='Production PV', color='orange', linewidth=plot_config.line_width)
+    _axes[0].plot(_time_hours, timestep_df['consumption_w'].values / 1000,
+                  label='Consommation', color='blue', linewidth=plot_config.line_width)
+    _axes[0].set_ylabel('Puissance (kW)', fontsize=plot_config.font_size)
+    _axes[0].legend(fontsize=plot_config.font_size)
+    _axes[0].grid(True, alpha=0.3)
+    _axes[0].set_title('Production PV et Consommation', fontsize=plot_config.font_size + 1)
+
+    # Plot 2: Battery SOE
+    _axes[1].plot(_time_hours, timestep_df['current_soe_wh'].values / 1000,
+                  label='SOE batterie', color='green', linewidth=plot_config.line_width)
+    _axes[1].set_ylabel('Énergie (kWh)', fontsize=plot_config.font_size)
+    _axes[1].legend(fontsize=plot_config.font_size)
+    _axes[1].grid(True, alpha=0.3)
+    _axes[1].set_title('État d\'énergie de la batterie', fontsize=plot_config.font_size + 1)
+
+    # Plot 3: Battery Power and Grid Power
+    _axes[2].plot(_time_hours, timestep_df['battery_power_w'].values / 1000,
+                  label='Puissance batterie', color='green', linewidth=plot_config.line_width)
+    _axes[2].plot(_time_hours, timestep_df['grid_power_w'].values / 1000,
+                  label='Puissance réseau', color='red', linewidth=plot_config.line_width, alpha=0.7)
+    _axes[2].axhline(y=0, color='black', linestyle='--', linewidth=0.5)
+    _axes[2].set_xlabel('Temps (heures)', fontsize=plot_config.font_size)
+    _axes[2].set_ylabel('Puissance (kW)', fontsize=plot_config.font_size)
+    _axes[2].legend(fontsize=plot_config.font_size)
+    _axes[2].grid(True, alpha=0.3)
+    _axes[2].set_title('Puissance batterie et réseau', fontsize=plot_config.font_size + 1)
+
+    plt.tight_layout()
+
+    # Display configuration info
+    mo.md(f"""
+    **Configuration analysée:**
+    - Panneaux PV: {_n_panels}
+    - Capacité batterie: {_battery_capacity_wh / 1000:.0f} kWh
+    """)
     return
 
 
@@ -1055,7 +1182,7 @@ def _(mo, np, plot_config, plt, results_3d_df):
 
     # Prepare data for 3D plot
     _pv_range = results_3d_df['pv_panels'].unique()
-    _battery_range = results_3d_df['battery_capacity_kwh'].unique()
+    _battery_range = results_3d_df['battery_capacity_wh'].unique()
     _X, _Y = np.meshgrid(_pv_range, _battery_range)
     _Z = results_3d_df['composite'].values.reshape(len(_battery_range), len(_pv_range))
 
@@ -1068,7 +1195,7 @@ def _(mo, np, plot_config, plt, results_3d_df):
 
     # Add labels and title
     _ax.set_xlabel('Nombre de panneaux PV', fontsize=plot_config.font_size)
-    _ax.set_ylabel('Capacité batterie (kWh)', fontsize=plot_config.font_size)
+    _ax.set_ylabel('Capacité batterie (Wh)', fontsize=plot_config.font_size)
     _ax.set_zlabel('Critère composite (%)', fontsize=plot_config.font_size)
     _ax.set_title('Critère composite - Système PV + Batterie (Été)', fontsize=plot_config.font_size + 2)
 
@@ -1083,21 +1210,16 @@ def _(mo, np, plot_config, plt, results_3d_df):
     # Find and mark maximum
     _max_idx = results_3d_df['composite'].idxmax()
     _max_pv = results_3d_df.loc[_max_idx, 'pv_panels']
-    _max_battery = results_3d_df.loc[_max_idx, 'battery_capacity_kwh']
+    _max_battery = results_3d_df.loc[_max_idx, 'battery_capacity_wh']
     _max_composite = results_3d_df.loc[_max_idx, 'composite']
 
     # Display statistics
     mo.md(f"""
     **Optimum global:**
     - Panneaux PV: {int(_max_pv)}
-    - Capacité batterie: {_max_battery:.0f} kWh
+    - Capacité batterie: {_max_battery:.0f} Wh ({_max_battery / 1000:.0f} kWh)
     - Critère composite: {_max_composite:.2f}%
     """)
-    return
-
-
-@app.cell
-def _():
     return
 
 
