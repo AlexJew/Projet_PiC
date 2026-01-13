@@ -927,7 +927,7 @@ def compute_values_simple_battery_model(
 ):
     # PARAMÈTRES CONFIGURABLES
     _n_panels = 50  # Fixe à 50 panneaux
-    battery_capacity_wh_fixed = 50000  # 50 kWh par défaut
+    battery_capacity_wh_fixed = 30000  # 30 kWh par défaut
 
     # Extract summer consumption
     _consumption_ete = charge['Été'].values
@@ -1158,16 +1158,17 @@ def _(mo):
     return
 
 
-@app.cell
+@app.cell(hide_code=True)
 def compute_composite_criteria_for_multiple_configurations(
     battery_config,
     charge,
+    mo,
     np,
     pv_config,
     solaire_ete,
 ):
     # Define parameter ranges
-    pv_panel_range = range(0, 101, 1)  # 0 to 50 panels
+    pv_panel_range = range(0, 101, 1)  # 0 to 100 panels
     battery_capacity_range = range(0, 201, 5)  # 0 to 100 kWh in 5 kWh steps
 
     # Initialize results storage
@@ -1216,6 +1217,7 @@ def compute_composite_criteria_for_multiple_configurations(
             _initial_soc = battery_config.initial_soc
             _min_soc = battery_config.min_soc
             _max_soc = battery_config.max_soc
+        
 
             # Initialize battery state
             if battery_capacity_w_minutes == 0:
@@ -1289,17 +1291,13 @@ def compute_composite_criteria_for_multiple_configurations(
             results['final_soe_kWh'].append(_current_soe / 60 / 1000)
 
     print("Simulation completed!")
+
+    mo.ui.table(results)
     return (results,)
 
 
 @app.cell
-def _(mo, results):
-    mo.ui.table(results)
-    return
-
-
-@app.cell
-def plot_3d_curve(np, plot_config, plt, results):
+def plot_3d_curve(np, paths_config, plot_config, plt, results):
     # Convert results to numpy arrays for 3D plotting
     pv_panels = np.array(results['n_panels'])
     battery_capacities = np.array(results['battery_capacity_kwh'])
@@ -1314,7 +1312,7 @@ def plot_3d_curve(np, plot_config, plt, results):
     COMP_grid = composite_values.reshape(len(PV_unique), len(BAT_unique))
 
     # Create 3D surface plot
-    fig = plt.figure(figsize=(20, 9))
+    fig = plt.figure(figsize=(12, 9), constrained_layout = True)
     ax = fig.add_subplot(111, projection='3d')
 
     # Create surface plot
@@ -1335,37 +1333,23 @@ def plot_3d_curve(np, plot_config, plt, results):
     # Set viewing angle for better visualization
     ax.view_init(elev=20, azim=45)
 
-    plt.subplots_adjust(left=0.5, right=0.9, top=0.9, bottom=0.1)
-    plt.tight_layout() 
+    # Export the image
+    out_dir = paths_config.output_dir
+    out_dir.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out_dir / "surface_composite.png", dpi=200)
+
+    # Visualize the image
     plt.gca()
-    return BAT_grid, COMP_grid, PV_grid
-
-
-@app.cell
-def _(COMP_grid):
-    COMP_grid[0]
     return
 
 
 @app.cell
-def _():
-    return
+def _(mo):
+    mo.md(r"""
+    ### Comparaison des critères d'autoconsommation, d'autoproduction et critère composite avec et sans batterie
 
-
-@app.cell
-def _(PV_grid):
-    PV_grid[0]
-    return
-
-
-@app.cell
-def _(BAT_grid):
-    BAT_grid[0]
-    return
-
-
-@app.cell
-def _():
+    Dans cette section, nous allons générer à nouveau
+    """)
     return
 
 
