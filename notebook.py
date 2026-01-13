@@ -927,7 +927,7 @@ def compute_values_simple_battery_model(
 ):
     # PARAMÈTRES CONFIGURABLES
     _n_panels = 50  # Fixe à 50 panneaux
-    battery_capacity_wh_fixed = 30000  # 50 kWh par défaut
+    battery_capacity_wh_fixed = 50000  # 50 kWh par défaut
 
     # Extract summer consumption
     _consumption_ete = charge['Été'].values
@@ -962,22 +962,14 @@ def compute_values_simple_battery_model(
     # Initialize timestep data storage
     _timestep_data = {
         'timestep': [],
-        'current_soe_wh': [],
+        'current_soe_w_minutes': [],
         'consumption_w': [],
         'production_w': [],
         'net_power_w' : [],
         'battery_power_w': [],  # Positive = charging, negative = discharging
         'grid_power_w': [],  # Positive = importing, negative = exporting
-        'locally_consumed_w_minutes': [],
-        'total_production_w_minutes': [],
-        'total_consumption_w_minutes': [],
-        'battery_soe_w_minutes': []
+        'local_consumption_w': []
     }
-
-    # Track energy flows for metric calculations
-    _total_consumption = 0
-    _total_production = 0
-    _total_locally_consumed = 0
 
     # Timestep simulation
     for _i in range(len(_consumption_ete)):
@@ -985,51 +977,41 @@ def compute_values_simple_battery_model(
         _production = _production_scaled[_i]
         _net_power = _production - _consumption
 
-        # Update totals
-        _total_consumption += _consumption  # Convert to W•minutes (assuming 1-minute timesteps)
-        _total_production += _production # Convert to W•minutes
+        if _net_power > 0: # Excess production
+            _battery_power = min(_net_power, _battery_max_capacity - _current_soe)
 
-        if _net_power > 0:
-        
-            # Excess production
-            _power_to_add = min(_net_power, _battery_max_capacity - _current_soe)
-            _current_soe += _power_to_add
-            _battery_power = _power_to_add # Charging
-            _grid_power = _net_power - _power_to_add  # Excess to grid
-            _locally_consumed = min(_production, _consumption + _power_to_add)
-        
-        else:
-            # Deficit
-            _power_needed = abs(_net_power)
-            _discharge = min(_power_needed, _current_soe - _battery_min_capacity)
-            _current_soe -= _discharge
-            _battery_power = -_discharge  # Discharging
-            _grid_power = -(_power_needed - _discharge)  # From grid
-            _locally_consumed = min(_production, _consumption)
+        else: # Deficit production
+            _battery_power = max(_net_power, _battery_min_capacity - _current_soe)
+
+        # Update current soe
+        _current_soe += _battery_power
+        _grid_power = _net_power - _battery_power # Grid balances the needs from the battery
+        _local_consumption = _production - max(_grid_power, 0) # Assume the entire production is consumed except 
+                                                               # when there is electriciy exported out
 
         # Store timestep data
         _timestep_data['timestep'].append(_i)
-        _timestep_data['current_soe_wh'].append(_current_soe)
-        _timestep_data['consumption_w'].append(_consumption_ete[_i])
-        _timestep_data['production_w'].append(_production_scaled[_i])
+        _timestep_data['current_soe_w_minutes'].append(_current_soe)
+        _timestep_data['consumption_w'].append(_consumption)
+        _timestep_data['production_w'].append(_production)
         _timestep_data['net_power_w'].append(_net_power)
         _timestep_data['battery_power_w'].append(_battery_power)
         _timestep_data['grid_power_w'].append(_grid_power)
-        _timestep_data['locally_consumed_w_minutes'].append(_locally_consumed)
-        _timestep_data['total_production_w_minutes'].append(_total_production)
-        _timestep_data['total_consumption_w_minutes'].append(_total_consumption)
-        _timestep_data['battery_soe_w_minutes'].append(_current_soe)
+        _timestep_data['local_consumption_w'].append(_local_consumption)
 
-    _total_locally_consumed = sum(_timestep_data['locally_consumed_w_minutes']) + (_current_soe - _initial_soe)
-    _total_consumption = _timestep_data['total_consumption_w_minutes'][-1]
-    _total_production = _timestep_data['total_production_w_minutes'][-1]
+    # Compute total local consumption, discounting for cases of battery over-charge
+    _total_local_consumption = sum(_timestep_data['local_consumption_w']) - max(0, _current_soe - _initial_soe)
+
+    # Compute total consumption and total production
+    _total_consumption = sum(_timestep_data['consumption_w'])
+    _total_production = sum(_timestep_data['production_w'])
 
     timestep_df = pd.DataFrame(_timestep_data)
     mo.md(f"""Les données utilisées: 
     - Nombre de panneaux solaires: {_n_panels}
     - Taille de la batterie en kWh: {battery_capacity_wh_fixed / 1000}
-    - Part autoconsommée: {_total_locally_consumed / _total_production * 100:.2f} %
-    - Part autoproduite: {_total_locally_consumed / _total_consumption * 100:.2f} %
+    - Part autoconsommée: {_total_local_consumption / _total_production * 100:.2f} %
+    - Part autoproduite: {_total_local_consumption / _total_consumption * 100:.2f} %
 
     {mo.ui.table(timestep_df)}""")
     return battery_capacity_wh_fixed, timestep_df
@@ -1052,7 +1034,7 @@ def visualize_simple_battery_model(
     viz_df["Index"] = viz_df["timestep"]
 
     # Convert SOE to SOC percentage - Fixed variable name
-    viz_df["soc_percent"] = (viz_df["current_soe_wh"] / battery_capacity_wh_fixed) * 100
+    viz_df["soc_percent"] = ((viz_df["current_soe_w_minutes"] / 60) / battery_capacity_wh_fixed) * 100
 
     # Convert all power values to kW for better readability
     viz_df["consumption_kw"] = viz_df["consumption_w"] / 1000
@@ -1061,10 +1043,13 @@ def visualize_simple_battery_model(
     viz_df["grid_power_kw"] = viz_df["grid_power_w"] / 1000
     viz_df["net_power_kw"] = viz_df["net_power_w"] / 1000
 
-    # Create power data in long format for the main chart
-    power_data = viz_df[
-        ["Index", "net_power_kw", "battery_power_kw", "grid_power_kw"]
+    # Create power data in long format for the line charts (battery and grid only)
+    line_power_data = viz_df[
+        ["Index", "battery_power_kw", "grid_power_kw"]
     ].melt(id_vars=["Index"], var_name="Type", value_name="Power_kW")
+
+    # Create separate data for net power area chart
+    net_power_data = viz_df[["Index", "net_power_kw"]].copy()
 
     # Define colors and labels
     power_labels = {
@@ -1073,25 +1058,44 @@ def visualize_simple_battery_model(
         "grid_power_kw": "Réseau",
     }
 
-    power_colors = ["#d62728", "#2ca02c", "#1f77b4"]  # Red, Green, Blue
+    power_colors_map = {
+        "Nette": "#2ca02c",
+        "Batterie": "#d62728" ,
+        "Réseau": "#1f77b4"
+    }
 
-    # Map labels in the dataframe
-    power_data["Type_Label"] = power_data["Type"].map(power_labels)
+    # Map labels in the line dataframe
+    line_power_data["Type_Label"] = line_power_data["Type"].map(power_labels)
 
-    # Create main power chart (left y-axis) using existing time encoding function
-    power_chart = (
-        alt.Chart(power_data)
+    # Create net power area chart
+    net_power_chart = (
+        alt.Chart(net_power_data)
+        .mark_area(opacity=0.5, color="#2ca02c")
+        .encode(
+            x=create_time_axis_encoding(plot_config),
+            y=alt.Y("net_power_kw:Q", title="Puissance (kW)"),
+            tooltip=["Index:Q", alt.Tooltip("net_power_kw:Q", title="Nette (kW)", format=".2f")]
+        )
+    )
+
+    # Create line charts for battery and grid power
+    line_power_chart = (
+        alt.Chart(line_power_data)
         .mark_line(strokeWidth=2)
         .encode(
             x=create_time_axis_encoding(plot_config),
             y=alt.Y("Power_kW:Q", title="Puissance (kW)"),
             color=alt.Color(
                 "Type_Label:N",
-                scale=alt.Scale(range=power_colors),
+                scale=alt.Scale(domain=list(power_colors_map.keys()), range=list(power_colors_map.values())),
                 legend=alt.Legend(title="Puissance"),
             ),
+            tooltip=["Index:Q", "Type_Label:N", alt.Tooltip("Power_kW:Q", format=".2f")]
         )
     )
+
+    # Combine area and line charts
+    power_chart = alt.layer(net_power_chart, line_power_chart)
 
     # Create SOC chart (right y-axis) using existing time encoding function
     soc_chart = (
@@ -1163,8 +1167,8 @@ def compute_composite_criteria_for_multiple_configurations(
     solaire_ete,
 ):
     # Define parameter ranges
-    pv_panel_range = range(0, 51, 1)  # 0 to 50 panels
-    battery_capacity_range = range(0, 101, 5)  # 0 to 100 kWh in 5 kWh steps
+    pv_panel_range = range(0, 101, 1)  # 0 to 50 panels
+    battery_capacity_range = range(0, 201, 5)  # 0 to 100 kWh in 5 kWh steps
 
     # Initialize results storage
     results = {
@@ -1173,7 +1177,7 @@ def compute_composite_criteria_for_multiple_configurations(
         'autoconsommation': [],
         'autoproduction': [],
         'composite_criterion': [],
-        'total_locally_consumed_kWh': [],
+        'total_local_consumption_kWh': [],
         'total_consumption_kWh': [],
         'total_production_kWh': [],
         'initial_soe_kWh': [],
@@ -1200,20 +1204,19 @@ def compute_composite_criteria_for_multiple_configurations(
     for n_panels in pv_panel_range:
         for battery_capacity_kwh in battery_capacity_range:
             battery_capacity_w_minutes = battery_capacity_kwh * 1000 * 60 # Convert to W•minutes
-        
+
             # Scale production for current panel count
             if n_panels == 0:
                 _production_scaled = np.zeros_like(_production_ete_reference)
             else:
                 _scaling_factor = n_panels / pv_config.reference_panels
                 _production_scaled = _production_ete_reference * _scaling_factor
-        
+
             # Battery simulation parameters
-            _battery_efficiency = battery_config.efficiency
             _initial_soc = battery_config.initial_soc
             _min_soc = battery_config.min_soc
             _max_soc = battery_config.max_soc
-        
+
             # Initialize battery state
             if battery_capacity_w_minutes == 0:
                 # No battery case
@@ -1221,70 +1224,65 @@ def compute_composite_criteria_for_multiple_configurations(
                 _current_soe = 0
                 _battery_min_capacity = 0
                 _battery_max_capacity = 0
+                _battery_power = 0
             else:
                 _initial_soe = _initial_soc * battery_capacity_w_minutes # in W•minutes
                 _current_soe = _initial_soe # in W•minutes
                 _battery_min_capacity = _min_soc * battery_capacity_w_minutes # in W•minutes
                 _battery_max_capacity = _max_soc * battery_capacity_w_minutes # in W•minutes
-        
-            # Track energy flows for metric calculations
-            _total_consumption = 0 # in Wh
-            _total_production = 0 # in Wh
-            _total_locally_consumed = 0 # in Wh
-        
+
+            # Set up cumulative metrics
+            _total_consumption = 0
+            _total_production = 0
+            _total_local_consumption = 0
+
             # Timestep simulation
             for _i in range(len(_consumption_ete)):
                 _consumption = _consumption_ete[_i] # in W
                 _production = _production_scaled[_i] # in W
                 _net_power = _production - _consumption # in W
-            
-                # Update totals
-                _total_consumption += _consumption  # in W•minutes (assuming 1-minute timesteps)
-                _total_production += _production # in W•minutes
-            
-                if battery_capacity_w_minutes == 0:
-                    # No battery - direct consumption
-                    _locally_consumed = min(_production, _consumption) # in W•minutes
-                else:
-                    # Battery simulation
-                    if _net_power > 0:
-                        # Excess production
-                        _power_to_add = min(_net_power, (_battery_max_capacity - _current_soe))
-                        _current_soe += _power_to_add
-                        _locally_consumed = min(_production, _consumption + _power_to_add)
-                    else:
-                        # Deficit
-                        _power_needed = abs(_net_power)
-                        _discharge = min(_power_needed, (_current_soe - _battery_min_capacity))
-                        _current_soe -= _discharge
-                        _locally_consumed = min(_production, _consumption)
                 
-                _total_locally_consumed += _locally_consumed
-        
-            # Calculate metrics
-            _diff_soe = (_current_soe - _initial_soe)
-            _total_locally_consumed += _diff_soe
-        
+                if battery_capacity_w_minutes != 0: # Battery simulation
+                
+                    if _net_power > 0: # Excess production
+                            _battery_power = min(_net_power, _battery_max_capacity - _current_soe)
+                
+                    else: # Deficit production
+                        _battery_power = max(_net_power, _battery_min_capacity - _current_soe)
+
+                # Compute values
+                _current_soe += _battery_power # 0 if battery_capacity_w_minutes == 0
+                _grid_power = _net_power - _battery_power # Grid balances the needs from the battery
+                                                          # or is equal to net power demand if no battery
+                _local_consumption = _production - max(_grid_power, 0) # Assume the entire production is consumed 
+                                                                       # except when there is electriciy exported
+
+                # Update cumulative metrics
+                _total_consumption += _consumption
+                _total_production += _production
+                _total_local_consumption += _local_consumption
+
+            # Update total local consumption to discount for cases of battery over-charge
+            _total_local_consumption = _total_local_consumption - max(0, _current_soe - _initial_soe)
+
+            # Compute self-production and self-consumption
+            _self_production = (_total_local_consumption / _total_consumption) * 100
+
             if _total_production > 0:
-                _autoconsommation = (_total_locally_consumed / _total_production) * 100
+                _self_consumption = (_total_local_consumption / _total_production) * 100
             else:
-                _autoconsommation = 100.0
-        
-            if _total_consumption > 0:
-                _autoproduction = (_total_locally_consumed / _total_consumption) * 100
-            else:
-                _autoproduction = 0.0
-        
+                _self_consumption = 100.0
+
             # Composite criterion (simple average)
-            _composite = (_autoconsommation + _autoproduction) / 2
-        
+            _composite = (_self_consumption + _self_production) / 2
+
             # Store results
             results['n_panels'].append(n_panels)
             results['battery_capacity_kwh'].append(battery_capacity_kwh)
-            results['autoconsommation'].append(_autoconsommation)
-            results['autoproduction'].append(_autoproduction)
+            results['autoconsommation'].append(_self_consumption)
+            results['autoproduction'].append(_self_production)
             results['composite_criterion'].append(_composite)
-            results['total_locally_consumed_kWh'].append(_total_locally_consumed / 60 / 1000)
+            results['total_local_consumption_kWh'].append(_total_local_consumption / 60 / 1000)
             results['total_consumption_kWh'].append(_total_consumption / 60 / 1000)
             results['total_production_kWh'].append(_total_production / 60 / 1000)
             results['initial_soe_kWh'].append(_initial_soe / 60 / 1000)
@@ -1301,7 +1299,7 @@ def _(mo, results):
 
 
 @app.cell
-def _(np, plot_config, plt, results):
+def plot_3d_curve(np, plot_config, plt, results):
     # Convert results to numpy arrays for 3D plotting
     pv_panels = np.array(results['n_panels'])
     battery_capacities = np.array(results['battery_capacity_kwh'])
@@ -1310,22 +1308,18 @@ def _(np, plot_config, plt, results):
     # Create meshgrid for 3D surface plot
     PV_unique = np.unique(pv_panels)
     BAT_unique = np.unique(battery_capacities)
-    PV_grid, BAT_grid = np.meshgrid(PV_unique, BAT_unique)
+    BAT_grid, PV_grid = np.meshgrid(BAT_unique, PV_unique)
 
     # Reshape composite values to match meshgrid
-    COMP_grid = composite_values.reshape(len(BAT_unique), len(PV_unique))
+    COMP_grid = composite_values.reshape(len(PV_unique), len(BAT_unique))
 
     # Create 3D surface plot
-    fig = plt.figure(figsize=(12, 9))
+    fig = plt.figure(figsize=(20, 9))
     ax = fig.add_subplot(111, projection='3d')
 
     # Create surface plot
     surf = ax.plot_surface(PV_grid, BAT_grid, COMP_grid, 
                           cmap='viridis', alpha=0.9, linewidth=0, antialiased=True)
-
-    # Add contour lines on the bottom for better readability
-    contours = ax.contour(PV_grid, BAT_grid, COMP_grid, zdir='z', 
-                         offset=COMP_grid.min()-5, cmap='viridis', alpha=0.5)
 
     # Customize the plot
     ax.set_xlabel('Nombre de panneaux PV', fontsize=plot_config.font_size)
@@ -1338,25 +1332,35 @@ def _(np, plot_config, plt, results):
     cbar = plt.colorbar(surf, ax=ax, shrink=0.5, aspect=20)
     cbar.set_label('Critère composite (%)', fontsize=plot_config.font_size)
 
-    # Find and mark the optimal point
-    max_idx = np.argmax(composite_values)
-    optimal_pv = results['n_panels'][max_idx]
-    optimal_battery = results['battery_capacity_kwh'][max_idx]
-    optimal_value = results['composite_criterion'][max_idx]
-
-    ax.scatter([optimal_pv], [optimal_battery], [optimal_value], 
-              color='red', s=100, alpha=1.0, marker='o')
-
-    # Add text annotation for optimal point
-    ax.text(optimal_pv, optimal_battery, optimal_value + 2, 
-            f'Optimal:\n{optimal_pv} PV\n{optimal_battery} kWh\n{optimal_value:.1f}%',
-            fontsize=plot_config.font_size - 1, ha='center')
-
     # Set viewing angle for better visualization
     ax.view_init(elev=20, azim=45)
 
-    plt.tight_layout()
+    plt.subplots_adjust(left=0.5, right=0.9, top=0.9, bottom=0.1)
+    plt.tight_layout() 
     plt.gca()
+    return BAT_grid, COMP_grid, PV_grid
+
+
+@app.cell
+def _(COMP_grid):
+    COMP_grid[0]
+    return
+
+
+@app.cell
+def _():
+    return
+
+
+@app.cell
+def _(PV_grid):
+    PV_grid[0]
+    return
+
+
+@app.cell
+def _(BAT_grid):
+    BAT_grid[0]
     return
 
 
